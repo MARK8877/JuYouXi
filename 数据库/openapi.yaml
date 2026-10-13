@@ -1,0 +1,672 @@
+openapi: 3.0.3
+info:
+  title: 剧库 MySQL 独立 API
+  version: 1.0.0
+  description: |
+    与已检查的 #library 页面保持兼容的独立持久化 API。当前服务不负责红果上游抓取、播放转码或实际下载 worker。
+servers:
+  - url: http://127.0.0.1:9010
+    description: 独立服务默认地址
+tags:
+  - name: system
+  - name: library
+  - name: viewer
+  - name: downloads
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: 健康检查
+      responses:
+        '200':
+          description: HTTP 服务可用
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [status]
+                    properties:
+                      status:
+                        type: string
+                        example: ok
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /api/ui/viewer:
+    get:
+      tags: [viewer]
+      summary: 获取当前浏览器身份和可用站源
+      description: 首次访问时设置 HttpOnly 的 juku_viewer_id Cookie，用于隔离追剧和下载记录。
+      responses:
+        '200':
+          description: 浏览器身份状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready, sources, onlineOnly, account]
+                properties:
+                  ready: {type: boolean, example: true}
+                  sources:
+                    type: array
+                    items: {type: string}
+                    example: [hongguo]
+                  onlineOnly: {type: boolean, example: false}
+                  account: {nullable: true}
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ui/dramas:
+    get:
+      tags: [library]
+      summary: 获取剧库
+      parameters:
+        - $ref: '#/components/parameters/Source'
+        - name: revision
+          in: query
+          schema: {type: integer, format: int64, minimum: 0}
+          description: 页面当前缓存版本；服务始终返回当前持久化数据。
+        - name: update
+          in: query
+          schema: {type: string, enum: ['0', '1']}
+        - name: priority
+          in: query
+          schema: {type: string, maxLength: 6000}
+          description: 逗号分隔的优先补齐剧集 ID，保留以兼容现有页面。
+      responses:
+        '200':
+          description: 剧库快照
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LibrarySnapshot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ui/search:
+    get:
+      tags: [library]
+      summary: 搜索已持久化剧库
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+          example: 测试
+      responses:
+        '200':
+          description: 匹配结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [query, data, total, saved]
+                properties:
+                  query: {type: string}
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/Drama'}
+                  total: {type: integer, minimum: 0}
+                  saved: {type: boolean}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ui/dramas/refresh:
+    post:
+      tags: [library]
+      summary: 返回单部剧的最新持久化资料
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dramaId]
+              properties:
+                dramaId: {type: string, example: 'hongguo:123'}
+      responses:
+        '200':
+          description: 剧集资料
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dramaId, drama, retryAfter]
+                properties:
+                  dramaId: {type: string}
+                  drama: {$ref: '#/components/schemas/Drama'}
+                  retryAfter: {type: integer, example: 300}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /api/ui/cover/repair:
+    post:
+      tags: [library]
+      summary: 返回已持久化封面地址
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dramaId]
+              properties:
+                dramaId: {type: string}
+                cover: {type: string, description: 页面上一次观察到的地址}
+      responses:
+        '200':
+          description: 当前封面
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dramaId, retryAfter]
+                properties:
+                  dramaId: {type: string}
+                  cover: {type: string}
+                  retryAfter: {type: integer, example: 300}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /api/ui/following:
+    get:
+      tags: [viewer]
+      summary: 获取当前浏览器追剧清单
+      responses:
+        '200':
+          description: 追剧数据
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, limit]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/Following'}
+                  limit: {type: integer, example: 1000}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      tags: [viewer]
+      summary: 更新收藏、已看或新集基准
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dramaId]
+              properties:
+                dramaId: {type: string}
+                saved: {type: boolean}
+                completed: {type: boolean}
+                acknowledge: {type: boolean, description: 将当前集数写入已知集数基准}
+      responses:
+        '200':
+          description: 保存结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, entry]
+                properties:
+                  ok: {type: boolean, example: true}
+                  entry: {$ref: '#/components/schemas/Following'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /api/ui/history:
+    get:
+      tags: [viewer]
+      summary: 获取当前浏览器观看记录
+      responses:
+        '200':
+          description: 按最近观看时间倒序返回观看记录
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/PlaybackHistory'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      tags: [viewer]
+      summary: 保存当前剧集观看记录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dramaId, episodeNumber]
+              properties:
+                dramaId: {type: string}
+                episodeNumber: {type: integer, minimum: 1, maximum: 10000}
+                positionSeconds: {type: integer, minimum: 0}
+                durationSeconds: {type: integer, minimum: 0}
+      responses:
+        '200':
+          description: 保存结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, entry]
+                properties:
+                  ok: {type: boolean, example: true}
+                  entry: {$ref: '#/components/schemas/PlaybackHistory'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /api/ui/comments:
+    get:
+      tags: [viewer]
+      summary: 获取短剧评论；首次读取且无评论时初始化10条一级评论
+      parameters:
+        - name: dramaId
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: 一级评论及二级回复列表；total 为两级评论合计
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dramaId, data, total]
+                properties:
+                  dramaId: {type: string}
+                  data: {type: array, items: {$ref: '#/components/schemas/DramaComment'}}
+                  total: {type: integer}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      tags: [viewer]
+      summary: 保存一级评论或根评论下的二级回复（最多两层）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dramaId, content]
+              properties:
+                dramaId: {type: string, minLength: 1}
+                content: {type: string, minLength: 1, maxLength: 500}
+                parentId: {type: string, description: 根评论 ID；省略时创建一级评论}
+      responses:
+        '200':
+          description: 已保存的评论和最新评论总数
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, total]
+                properties:
+                  data: {$ref: '#/components/schemas/DramaComment'}
+                  total: {type: integer}
+                  parentReplyCount: {type: integer, description: 回复所属根评论的最新回复数}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /api/ui/engagement:
+    get:
+      tags: [viewer]
+      summary: 获取短剧模拟互动热度
+      description: 返回后台定时增长并持久化的模拟计数；评论热度不是评论记录。
+      parameters:
+        - name: dramaId
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: 模拟互动计数
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EngagementHeat'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /api/ui/episode-engagement:
+    post:
+      tags: [viewer]
+      summary: 预加载分集模拟互动热度
+      description: 首次预加载时为每集生成四项 1,000–9,999 的模拟计数并持久化；重复请求返回同一记录。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dramaId, episodeNumber]
+              properties:
+                dramaId: {type: string, minLength: 1}
+                episodeNumber: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: 分集互动计数
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EpisodeEngagement'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /api/ui/download:
+    post:
+      tags: [downloads]
+      summary: 持久化下载任务提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items: {type: string}
+                quality: {type: integer, minimum: 0, maximum: 10, default: 0}
+      responses:
+        '202':
+          description: 任务已写入数据库；本项目不启动下载 worker。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pending]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/DownloadTask'}
+                  pending: {type: boolean, example: true}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /api/ui/rankings:
+    get:
+      tags: [library]
+      summary: 获取榜单目录或榜单分页
+      parameters:
+        - name: board
+          in: query
+          schema: {type: string}
+        - name: page
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 500, default: 1}
+        - name: refresh
+          in: query
+          schema: {type: string, enum: ['0', '1']}
+      responses:
+        '200':
+          description: 榜单数据。当前独立服务未接入上游榜单时返回空数组。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [boards]
+                    properties:
+                      boards: {type: array, items: {type: object}}
+                  - type: object
+                    required: [boardId, page, items, hasMore, saved]
+                    properties:
+                      boardId: {type: string}
+                      page: {type: integer}
+                      items: {type: array, items: {type: object}}
+                      hasMore: {type: boolean}
+                      saved: {type: boolean}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /api/ui/recommendations:
+    post:
+      tags: [library]
+      summary: 获取分类推荐占位结果
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                genre: {type: string}
+                offset: {type: integer, minimum: 0}
+                sessionId: {type: string, maxLength: 4096}
+                seen: {type: array, items: {type: string}, maxItems: 540}
+      responses:
+        '200':
+          description: 推荐分页结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, nextOffset, sessionId, hasMore, saved]
+                properties:
+                  data: {type: array, items: {$ref: '#/components/schemas/Drama'}}
+                  nextOffset: {type: integer}
+                  sessionId: {type: string}
+                  hasMore: {type: boolean}
+                  saved: {type: boolean}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /api/ui/image:
+    get:
+      tags: [library]
+      summary: 重定向到剧集封面地址
+      parameters:
+        - name: url
+          in: query
+          required: true
+          schema: {type: string, format: uri}
+      responses:
+        '302':
+          description: 合法 HTTP/HTTPS 图片地址
+          headers:
+            Location: {schema: {type: string, format: uri}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+components:
+  parameters:
+    Source:
+      name: source
+      in: query
+      schema: {type: string, enum: [hongguo]}
+      description: 当前版本只持久化红果站源。
+  responses:
+    BadRequest:
+      description: 请求参数或 JSON 无效
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    InternalError:
+      description: 服务端或数据库错误
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    MethodNotAllowed:
+      description: HTTP 方法不支持
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+    SortMetadata:
+      type: object
+      properties:
+        version: {type: integer}
+        checkedAt: {type: string, format: date-time}
+        pending: {type: boolean}
+        coverChecked: {type: boolean}
+    Drama:
+      type: object
+      required: [id, title, name, desc, intro]
+      properties:
+        vip: {type: boolean, nullable: true}
+        id: {type: string, example: 'hongguo:123'}
+        source: {type: string, example: hongguo}
+        sourceId: {type: string}
+        title: {type: string}
+        name: {type: string}
+        desc: {type: string}
+        intro: {type: string}
+        cover: {}
+        coverUrl: {}
+        cover_url: {}
+        image: {}
+        imageUrl: {}
+        image_url: {}
+        img: {}
+        pic: {}
+        picture: {}
+        poster: {}
+        thumb: {}
+        thumbnail: {}
+        totalEpisode: {}
+        total_episode: {}
+        chapterCount: {}
+        chapter_count: {}
+        episodeCount: {}
+        episode_count: {}
+        total: {}
+        episodes: {}
+        duration: {}
+        channelName: {type: string}
+        category: {type: string}
+        categoryName: {type: string}
+        category_name: {type: string}
+        typeName: {type: string}
+        type_name: {type: string}
+        sortName: {type: string}
+        sort_name: {type: string}
+        remark: {type: string}
+        score: {type: string}
+        views: {type: string}
+        heat: {type: string}
+        onlineDate: {type: string}
+        tags: {type: array, items: {type: string}}
+        releaseStatus: {type: string}
+        sortMetadata: {$ref: '#/components/schemas/SortMetadata'}
+    LibrarySnapshot:
+      type: object
+      required: [revision, loadedAt, loading, metadata, metadataRemaining, sources, data]
+      properties:
+        revision: {type: integer, format: int64}
+        loadedAt: {type: string, format: date-time}
+        loading: {type: boolean}
+        metadata: {type: object, additionalProperties: true}
+        metadataRemaining: {type: object, additionalProperties: {type: integer}}
+        sources: {type: object, additionalProperties: {$ref: '#/components/schemas/LibrarySource'}}
+        data: {type: array, items: {$ref: '#/components/schemas/Drama'}}
+    LibrarySource:
+      type: object
+      required: [status, count, updatedAt]
+      properties:
+        status: {type: string}
+        count: {type: integer}
+        error: {type: string}
+        updatedAt: {type: string, format: date-time}
+    Following:
+      type: object
+      required: [dramaId, source, title, saved, completed, knownEpisodes, totalEpisode, newEpisodes, addedAt, updatedAt]
+      properties:
+        dramaId: {type: string}
+        source: {type: string}
+        title: {type: string}
+        category: {type: string}
+        saved: {type: boolean}
+        completed: {type: boolean}
+        knownEpisodes: {type: integer}
+        totalEpisode: {type: integer}
+        newEpisodes: {type: integer}
+        addedAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    PlaybackHistory:
+      type: object
+      required: [dramaId, source, title, episodeNumber, positionSeconds, durationSeconds, watchedAt]
+      properties:
+        dramaId: {type: string}
+        source: {type: string}
+        title: {type: string}
+        category: {type: string}
+        episodeNumber: {type: integer, minimum: 1}
+        positionSeconds: {type: integer, minimum: 0}
+        durationSeconds: {type: integer, minimum: 0}
+        watchedAt: {type: string, format: date-time}
+    DramaComment:
+      type: object
+      required: [id, dramaId, authorName, content, likeCount, replyCount, createdAt, isSeed]
+      properties:
+        id: {type: string}
+        dramaId: {type: string}
+        parentId: {type: string, nullable: true, description: 为空时为一级评论}
+        authorName: {type: string}
+        content: {type: string}
+        likeCount: {type: integer}
+        replyCount: {type: integer}
+        createdAt: {type: string, format: date-time}
+        isSeed: {type: boolean}
+        seedIndex: {type: integer, minimum: 1, maximum: 10}
+    EngagementHeat:
+      type: object
+      required: [dramaId, simulated, likes, comments, favorites, shares]
+      properties:
+        dramaId: {type: string}
+        simulated: {type: boolean, enum: [true]}
+        likes: {type: integer, format: int64, minimum: 0}
+        comments: {type: integer, format: int64, minimum: 0, description: 评论热度计数，不对应模拟评论内容}
+        favorites: {type: integer, format: int64, minimum: 0}
+        shares: {type: integer, format: int64, minimum: 0}
+        updatedAt: {type: string, format: date-time, nullable: true}
+    EpisodeEngagement:
+      type: object
+      required: [dramaId, episodeNumber, likes, comments, favorites, shares]
+      properties:
+        dramaId: {type: string}
+        episodeNumber: {type: integer, minimum: 1}
+        likes: {type: integer, format: int64, minimum: 1000, maximum: 9999}
+        comments: {type: integer, format: int64, minimum: 1000, maximum: 9999, description: 评论热度计数，不对应模拟评论内容}
+        favorites: {type: integer, format: int64, minimum: 1000, maximum: 9999}
+        shares: {type: integer, format: int64, minimum: 1000, maximum: 9999}
+        updatedAt: {type: string, format: date-time, nullable: true}
+    DownloadTask:
+      type: object
+      required: [id, dramaId, title, status, progress, createdAt, updatedAt]
+      properties:
+        id: {type: string}
+        dramaId: {type: string}
+        title: {type: string}
+        quality: {type: integer}
+        status: {type: string, example: queued}
+        progress: {type: integer, minimum: 0, maximum: 100}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}

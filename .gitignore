@@ -1,0 +1,10 @@
+.DS_Store
+**/.DS_Store
+
+# Local MySQL data, certificates, and runtime files
+/数据库/.mysql-data*/
+/数据库/server
+
+# Machine-local Flutter configuration and logs
+/前端/android/local.properties
+/前端/flutter_*.log
